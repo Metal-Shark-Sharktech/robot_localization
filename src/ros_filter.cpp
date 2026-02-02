@@ -1614,6 +1614,13 @@ void RosFilter<T>::loadParams()
       remove_gravitational_acceleration_[imu_topic_name + "_acceleration"] =
         remove_grav_acc;
 
+      bool remove_coriolis_acc = this->declare_parameter(
+        imu_topic_name +
+        "_remove_coriolis_acceleration",
+        false);
+      remove_coriolis_acceleration_[imu_topic_name + "_acceleration"] =
+        remove_coriolis_acc;
+
       // Set optional custom queue size
       int queue_size = this->declare_parameter(
         imu_topic_name +
@@ -1781,7 +1788,9 @@ void RosFilter<T>::loadParams()
           "_linear_acceleration_rejection_threshold is " <<
           accel_mahalanobis_thresh << "\n\t" << imu_topic_name <<
           "_remove_gravitational_acceleration is " <<
-          (remove_grav_acc ? "true" : "false") << "\n\t" <<
+          (remove_grav_acc ? "true" : "false") << "\n\t" << imu_topic_name <<
+          "_remove_coriolis_acceleration is " <<
+          (remove_coriolis_acc ? "true" : "false") << "\n\t" <<
           imu_topic_name << " pose update vector is " << pose_update_vec <<
           "\t" << imu_topic_name << " twist update vector is " <<
           twist_update_vec << "\t" << imu_topic_name <<
@@ -2803,6 +2812,31 @@ bool RosFilter<T>::prepareAcceleration(
         "Orientation is " <<
           trans.getRotation() << "Acceleration due to gravity is " << rotNorm <<
           "After removing acceleration due to gravity, acceleration is " <<
+          acc_tmp << "\n");
+    }
+
+    // Remove Coriolis/centripetal acceleration if requested.
+    // In a rotating reference frame, the measured acceleration includes the term
+    // ω × v which is needed to maintain circular motion but should not be
+    // integrated to update body-frame velocity. Without this correction, velocity
+    // estimates will grow incorrectly during rotational motion.
+    if (remove_coriolis_acceleration_[topic_name]) {
+      tf2::Vector3 angular_vel(
+        state(StateMemberVroll),
+        state(StateMemberVpitch),
+        state(StateMemberVyaw));
+      tf2::Vector3 linear_vel(
+        state(StateMemberVx),
+        state(StateMemberVy),
+        state(StateMemberVz));
+      tf2::Vector3 coriolis_acc = angular_vel.cross(linear_vel);
+      acc_tmp -= coriolis_acc;
+
+      RF_DEBUG(
+        "Angular velocity is " << angular_vel <<
+          ", linear velocity is " << linear_vel <<
+          ", Coriolis acceleration is " << coriolis_acc <<
+          ". After removing Coriolis acceleration, acceleration is " <<
           acc_tmp << "\n");
     }
 
