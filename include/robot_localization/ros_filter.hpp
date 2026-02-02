@@ -710,6 +710,18 @@ protected:
   //!
   std::map<std::string, bool> remove_gravitational_acceleration_;
 
+  //! @brief If including acceleration for each IMU input, whether or not we
+  //! remove Coriolis acceleration due to the rotating reference frame.
+  //!
+  //! When fusing body-frame accelerations from an IMU, the measured acceleration
+  //! includes centripetal/Coriolis terms (ω × v) that arise from the rotating
+  //! reference frame. If velocity is estimated by integrating these accelerations
+  //! without correction, velocity will grow incorrectly during rotational motion.
+  //! Enabling this option subtracts the ω × v term using the filter's current
+  //! estimates of angular velocity and linear velocity.
+  //!
+  std::map<std::string, bool> remove_coriolis_acceleration_;
+
   //! @brief An implicitly time ordered queue of past filter states used for
   //! smoothing.
   //
