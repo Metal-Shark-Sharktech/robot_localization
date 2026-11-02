@@ -113,6 +113,38 @@ TEST(EkfTest, Measurements) {
   }
 }
 
+TEST(EkfTest, NonFiniteCovarianceLeavesStateFiniteAndUpdatesTheRest) {
+  const double NON_FINITE_VALUES[] = {
+    std::numeric_limits<double>::quiet_NaN(),
+    std::numeric_limits<double>::infinity()};
+
+  for (const double non_finite : NON_FINITE_VALUES) {
+    robot_localization::Ekf filter;
+
+    robot_localization::Measurement measurement;
+    measurement.topic_name_ = "imu0";
+    measurement.measurement_ = Eigen::VectorXd::Zero(STATE_SIZE);
+    measurement.covariance_ = Eigen::MatrixXd::Identity(STATE_SIZE, STATE_SIZE);
+    measurement.update_vector_.assign(STATE_SIZE, true);
+    measurement.mahalanobis_thresh_ = std::numeric_limits<double>::max();
+    measurement.time_ = rclcpp::Time(1000000000);
+    filter.processMeasurement(measurement);
+
+    measurement.measurement_(robot_localization::StateMemberX) = 1.0;
+    measurement.measurement_(robot_localization::StateMemberRoll) = 1.0;
+    measurement.covariance_(
+      robot_localization::StateMemberRoll,
+      robot_localization::StateMemberRoll) = non_finite;
+    measurement.time_ = rclcpp::Time(1100000000);
+    filter.processMeasurement(measurement);
+
+    EXPECT_TRUE(filter.getState().allFinite());
+    EXPECT_TRUE(filter.getEstimateErrorCovariance().allFinite());
+    EXPECT_GT(filter.getState()(robot_localization::StateMemberX), 0.1);
+    EXPECT_NEAR(filter.getState()(robot_localization::StateMemberRoll), 0.0, 0.01);
+  }
+}
+
 int main(int argc, char ** argv)
 {
   rclcpp::init(argc, argv);

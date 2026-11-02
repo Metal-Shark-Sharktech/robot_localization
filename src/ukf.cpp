@@ -93,23 +93,7 @@ void Ukf::correct(const Measurement & measurement)
   // update the measured parts of our state vector
 
   // First, determine how many state vector values we're updating
-  std::vector<size_t> update_indices;
-  for (size_t i = 0; i < measurement.update_vector_.size(); ++i) {
-    if (measurement.update_vector_[i]) {
-      // Handle nan and inf values in measurements
-      if (std::isnan(measurement.measurement_(i))) {
-        FB_DEBUG(
-          "Value at index " << i <<
-            " was nan. Excluding from update.\n");
-      } else if (std::isinf(measurement.measurement_(i))) {
-        FB_DEBUG(
-          "Value at index " << i <<
-            " was inf. Excluding from update.\n");
-      } else {
-        update_indices.push_back(i);
-      }
-    }
-  }
+  const std::vector<size_t> update_indices = usableUpdateIndices(measurement);
 
   FB_DEBUG("Update indices are:\n" << update_indices << "\n");
 

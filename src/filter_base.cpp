@@ -33,6 +33,7 @@
 #include "robot_localization/filter_base.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <ostream>
 #include <vector>
 
@@ -192,6 +193,35 @@ const rclcpp::Duration & FilterBase::getSensorTimeout()
 
 const Eigen::VectorXd & FilterBase::getState() {return state_;}
 
+std::vector<size_t> FilterBase::usableUpdateIndices(const Measurement & measurement)
+{
+  const size_t measurement_length = measurement.update_vector_.size();
+
+  std::vector<size_t> update_indices;
+  for (size_t i = 0; i < measurement_length; ++i) {
+    if (!measurement.update_vector_[i]) {
+      continue;
+    }
+
+    bool usable = std::isfinite(measurement.measurement_(i));
+    for (size_t j = 0; usable && j < measurement_length; ++j) {
+      usable = !measurement.update_vector_[j] ||
+        (std::isfinite(measurement.covariance_(i, j)) &&
+        std::isfinite(measurement.covariance_(j, i)));
+    }
+
+    if (usable) {
+      update_indices.push_back(i);
+    } else {
+      FB_DEBUG(
+        "Value or covariance at index " << i <<
+          " was not finite. Excluding from update.\n");
+    }
+  }
+
+  return update_indices;
+}
+
 void FilterBase::processMeasurement(const Measurement & measurement)
 {
   FB_DEBUG(
@@ -229,23 +259,19 @@ void FilterBase::processMeasurement(const Measurement & measurement)
     FB_DEBUG("First measurement. Initializing filter.\n");
 
     // Initialize the filter, but only with the values we're using
-    size_t measurement_length = measurement.update_vector_.size();
-    for (size_t i = 0; i < measurement_length; ++i) {
-      state_[i] = (measurement.update_vector_[i] ? measurement.measurement_[i] :
-        state_[i]);
+    const std::vector<size_t> update_indices = usableUpdateIndices(measurement);
+    for (const size_t i : update_indices) {
+      state_[i] = measurement.measurement_[i];
     }
 
     // Same for covariance
-    for (size_t i = 0; i < measurement_length; ++i) {
-      for (size_t j = 0; j < measurement_length; ++j) {
-        estimate_error_covariance_(i, j) =
-          (measurement.update_vector_[i] && measurement.update_vector_[j] ?
-          measurement.covariance_(i, j) :
-          estimate_error_covariance_(i, j));
+    for (const size_t i : update_indices) {
+      for (const size_t j : update_indices) {
+        estimate_error_covariance_(i, j) = measurement.covariance_(i, j);
       }
     }
 
-    initialized_ = true;
+    initialized_ = !update_indices.empty();
   }
 
   if (delta >= rclcpp::Duration(0, 0u)) {

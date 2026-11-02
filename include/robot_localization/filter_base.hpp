@@ -312,6 +312,18 @@ protected:
     const double n_sigmas);
 
   /**
+   * @brief Selects the state variables a measurement can safely update.
+   *
+   * A non-finite value or covariance entry would spread through the Kalman
+   * gain into the whole state and covariance, where nothing can clear it. A
+   * variable is left out when its measurement or any of its covariance entries
+   * with the other updated variables is not finite.
+   * @param[in] measurement - The measurement to check
+   * @return The indices of the updated state variables that are usable
+   */
+  std::vector<size_t> usableUpdateIndices(const Measurement & measurement);
+
+  /**
    * @brief Converts the control term to an acceleration to be applied in the
    * prediction step
    * @param[in] reference_time - The time of the update (measurement used in the

@@ -29,6 +29,7 @@
  * ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
  * POSSIBILITY OF SUCH DAMAGE.
  */
+#include <cmath>
 #include <iostream>
 #include <queue>
 #include <string>
@@ -203,6 +204,31 @@ TEST(FilterBaseTest, MeasurementProcessing) {
   meas.time_ = msg;
   derived.processMeasurement(meas);
   EXPECT_EQ(derived.getLastMeasurementTime(), meas.time_);
+}
+
+TEST(FilterBaseTest, FirstMeasurementInitializesOnlyFromFiniteValues) {
+  robot_localization::FilterDerived2 derived;
+
+  Measurement meas;
+  meas.topic_name_ = "imuTest";
+  meas.measurement_ = Eigen::VectorXd::Ones(STATE_SIZE);
+  meas.covariance_ = Eigen::MatrixXd::Identity(STATE_SIZE, STATE_SIZE);
+  meas.update_vector_.resize(STATE_SIZE, true);
+  meas.time_ = rclcpp::Time(1000);
+
+  meas.covariance_.diagonal().setConstant(std::nan(""));
+  derived.processMeasurement(meas);
+  EXPECT_FALSE(derived.getInitializedStatus());
+
+  meas.covariance_ = Eigen::MatrixXd::Identity(STATE_SIZE, STATE_SIZE);
+  meas.covariance_(robot_localization::StateMemberRoll, robot_localization::StateMemberRoll) =
+    std::nan("");
+  derived.processMeasurement(meas);
+  EXPECT_TRUE(derived.getInitializedStatus());
+  EXPECT_TRUE(derived.getState().allFinite());
+  EXPECT_TRUE(derived.getEstimateErrorCovariance().allFinite());
+  EXPECT_EQ(derived.getState()(robot_localization::StateMemberRoll), 0.0);
+  EXPECT_EQ(derived.getState()(robot_localization::StateMemberX), 1.0);
 }
 
 int main(int argc, char ** argv)
