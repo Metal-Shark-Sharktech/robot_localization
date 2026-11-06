@@ -30,16 +30,27 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
+#include <chrono>
 #include <memory>
 #include <string>
+#include <thread>
+#include <vector>
 
 #include "gtest/gtest.h"
 
 #include "robot_localization/navsat_transform.hpp"
 
+#include "GeographicLib/Geocentric.hpp"
 #include "geometry_msgs/msg/transform_stamped.hpp"
+#include "nav_msgs/msg/odometry.hpp"
 #include "rclcpp/rclcpp.hpp"
+#include "robot_localization/srv/to_ll.hpp"
+#include "sensor_msgs/msg/imu.hpp"
+#include "sensor_msgs/msg/nav_sat_fix.hpp"
+#include "tf2/LinearMath/Transform.hpp"
+#include "tf2_geometry_msgs/tf2_geometry_msgs.hpp"
 #include "tf2_ros/buffer.hpp"
+#include "tf2_ros/static_transform_broadcaster.hpp"
 #include "tf2_ros/transform_listener.hpp"
 
 class EarthChainTest : public ::testing::Test
@@ -231,6 +242,145 @@ TEST_F(EarthChainTest, ParameterDefaults)
 
   node.reset();
 }
+
+// The robot's map pose taken through the earth frame must give back the fix that set the
+// datum, at any fix altitude, and toLL must agree with the earth frame.
+class EarthAltitudeTest : public ::testing::TestWithParam<double>
+{
+protected:
+  void SetUp() override
+  {
+    rclcpp::init(0, nullptr);
+  }
+
+  void TearDown() override
+  {
+    rclcpp::shutdown();
+  }
+};
+
+TEST_P(EarthAltitudeTest, EarthChainReturnsTheFix)
+{
+  const double fix_latitude = 29.2;
+  const double fix_longitude = -90.1;
+  const double fix_altitude = GetParam();
+  const tf2::Vector3 robot_in_map(3.0, -2.0, 0.15);
+
+  rclcpp::NodeOptions options;
+  options.parameter_overrides(
+  {
+    rclcpp::Parameter("use_local_cartesian", true),
+    rclcpp::Parameter("broadcast_cartesian_transform", false),
+    rclcpp::Parameter("broadcast_earth_transform", true),
+    rclcpp::Parameter("zero_altitude", true),
+    rclcpp::Parameter("wait_for_datum", false),
+  });
+  auto navsat = std::make_shared<robot_localization::NavSatTransform>(options);
+  auto helper = std::make_shared<rclcpp::Node>("earth_altitude_test_helper");
+
+  tf2_ros::StaticTransformBroadcaster static_broadcaster(*helper);
+  std::vector<geometry_msgs::msg::TransformStamped> mounts(2);
+  mounts[0].header.frame_id = "base_link";
+  mounts[0].child_frame_id = "gps_link";
+  mounts[0].transform.rotation.w = 1.0;
+  mounts[1] = mounts[0];
+  mounts[1].child_frame_id = "imu_link";
+  static_broadcaster.sendTransform(mounts);
+
+  tf2_ros::Buffer tf_buffer(helper->get_clock());
+  tf2_ros::TransformListener tf_listener(tf_buffer);
+
+  auto qos = rclcpp::SensorDataQoS();
+  auto odom_pub = helper->create_publisher<nav_msgs::msg::Odometry>("odometry/filtered", qos);
+  auto imu_pub = helper->create_publisher<sensor_msgs::msg::Imu>("imu", qos);
+  auto fix_pub = helper->create_publisher<sensor_msgs::msg::NavSatFix>("gps/fix", qos);
+  auto to_ll = helper->create_client<robot_localization::srv::ToLL>("toLL");
+
+  rclcpp::executors::SingleThreadedExecutor executor;
+  executor.add_node(navsat);
+  executor.add_node(helper);
+
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+  bool have_earth = false;
+  while (!have_earth && std::chrono::steady_clock::now() < deadline) {
+    const auto stamp = helper->now();
+
+    nav_msgs::msg::Odometry odom;
+    odom.header.stamp = stamp;
+    odom.header.frame_id = "map";
+    odom.child_frame_id = "base_link";
+    odom.pose.pose.position.x = robot_in_map.x();
+    odom.pose.pose.position.y = robot_in_map.y();
+    odom.pose.pose.position.z = robot_in_map.z();
+    odom.pose.pose.orientation.w = 1.0;
+    odom_pub->publish(odom);
+
+    sensor_msgs::msg::Imu imu;
+    imu.header.stamp = stamp;
+    imu.header.frame_id = "imu_link";
+    imu.orientation.w = 1.0;
+    imu_pub->publish(imu);
+
+    sensor_msgs::msg::NavSatFix fix;
+    fix.header.stamp = stamp;
+    fix.header.frame_id = "gps_link";
+    fix.status.status = sensor_msgs::msg::NavSatStatus::STATUS_FIX;
+    fix.latitude = fix_latitude;
+    fix.longitude = fix_longitude;
+    fix.altitude = fix_altitude;
+    fix_pub->publish(fix);
+
+    executor.spin_some(std::chrono::milliseconds(50));
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    have_earth = tf_buffer.canTransform("earth", "map", tf2::TimePointZero);
+  }
+  ASSERT_TRUE(have_earth) << "earth -> map was never published";
+
+  tf2::Transform earth_from_map;
+  tf2::fromMsg(
+    tf_buffer.lookupTransform("earth", "map", tf2::TimePointZero).transform,
+    earth_from_map);
+
+  const GeographicLib::Geocentric & wgs84 = GeographicLib::Geocentric::WGS84();
+  auto through_earth = [&](const tf2::Vector3 & map_point, double & lat, double & lon,
+    double & alt) {
+      const tf2::Vector3 ecef = earth_from_map * map_point;
+      wgs84.Reverse(ecef.x(), ecef.y(), ecef.z(), lat, lon, alt);
+    };
+
+  const double degree_tolerance = 1e-8;
+  const double height_tolerance = 1e-3;
+
+  double latitude = 0.0;
+  double longitude = 0.0;
+  double altitude = 0.0;
+  through_earth(robot_in_map, latitude, longitude, altitude);
+  EXPECT_NEAR(latitude, fix_latitude, degree_tolerance);
+  EXPECT_NEAR(longitude, fix_longitude, degree_tolerance);
+  EXPECT_NEAR(altitude, fix_altitude, height_tolerance);
+
+  ASSERT_TRUE(to_ll->wait_for_service(std::chrono::seconds(5)));
+  for (const tf2::Vector3 & map_point : {robot_in_map, tf2::Vector3(10.0, 5.0, -3.0)}) {
+    auto request = std::make_shared<robot_localization::srv::ToLL::Request>();
+    request->map_point.x = map_point.x();
+    request->map_point.y = map_point.y();
+    request->map_point.z = map_point.z();
+    auto future = to_ll->async_send_request(request);
+    ASSERT_EQ(
+      executor.spin_until_future_complete(future, std::chrono::seconds(5)),
+      rclcpp::FutureReturnCode::SUCCESS);
+    const auto ll_point = future.get()->ll_point;
+
+    through_earth(map_point, latitude, longitude, altitude);
+    EXPECT_NEAR(ll_point.latitude, latitude, degree_tolerance);
+    EXPECT_NEAR(ll_point.longitude, longitude, degree_tolerance);
+    EXPECT_NEAR(ll_point.altitude, altitude, height_tolerance);
+  }
+}
+
+INSTANTIATE_TEST_SUITE_P(
+  FixAltitudes, EarthAltitudeTest,
+  ::testing::Values(0.0, 2.885, -25.6, 120.0));
 
 int main(int argc, char ** argv)
 {
